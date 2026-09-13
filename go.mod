@@ -1,6 +1,6 @@
 module github.com/WongLoki/DJ4Hub
 
-go 1.26.3
+go 1.26.8
 
 replace github.com/damonto/euicc-go => ./third_party/euicc-go
 

@@ -87,6 +87,7 @@ type app struct {
 	esimMu            sync.RWMutex
 	esim              *esim.Manager
 	esimSwitchAllowed bool
+	usbStateMu        sync.RWMutex
 	usbAT             *usbAT
 	port              string
 	demo              bool
@@ -402,7 +403,8 @@ func serve(instance *app, listen string) {
 	go instance.monitorHistoryBackup(ctx)
 
 	if !instance.demo {
-		log.Printf("DJ 4G Hub is using %s", instance.port)
+		port, _, _ := instance.usbStateSnapshot()
+		log.Printf("DJ 4G Hub is using %s", port)
 	}
 	log.Printf("Open http://%s", listen)
 	serveErr := make(chan error, 1)
@@ -690,14 +692,20 @@ func (a *app) pollSMSOnce() error {
 		a.setSMSPollStatus(err)
 		return err
 	}
+	dev := a.currentUSBAT()
+	if dev == nil {
+		err := errors.New("AT serial port is unavailable")
+		a.setSMSPollStatus(err)
+		return err
+	}
 	identity := a.historyIdentity()
 	if identity == "" || identity != a.smsCardIdentity {
 		a.smsReassembler = smscodec.NewReassembler()
 	}
 	a.smsCardIdentity = identity
-	messages, err := a.readUSBATSMS()
+	messages, err := a.readUSBATSMS(dev)
 	if err != nil {
-		a.resetUSBATIfGone(err)
+		a.resetUSBATIfGoneForDevice(err, dev)
 		a.setSMSPollStatus(err)
 		return err
 	}
@@ -708,7 +716,7 @@ func (a *app) pollSMSOnce() error {
 	}
 	newCount, total := a.mergeSMS(messages)
 	if a.smsAutoCleanupME && len(messages) > 0 {
-		before, after, cleanupErr := a.clearUSBATSMSMemory("ME")
+		before, after, cleanupErr := a.clearUSBATSMSMemoryForDevice(dev, "ME")
 		if cleanupErr != nil {
 			log.Printf("auto cleanup ME SMS failed: %v", cleanupErr)
 		} else if before != after {
@@ -722,39 +730,79 @@ func (a *app) pollSMSOnce() error {
 	return nil
 }
 
+func cloneUSBDeviceStatus(device *usbDeviceStatus) *usbDeviceStatus {
+	if device == nil {
+		return nil
+	}
+	cloned := *device
+	cloned.Interfaces = append([]usbInterfaceStatus(nil), device.Interfaces...)
+	return &cloned
+}
+
+func (a *app) usbStateSnapshot() (port string, discoveryError string, usbDevice *usbDeviceStatus) {
+	a.usbStateMu.RLock()
+	defer a.usbStateMu.RUnlock()
+	return a.port, a.discoveryError, cloneUSBDeviceStatus(a.usbDevice)
+}
+
+func (a *app) currentUSBAT() *usbAT {
+	a.usbStateMu.RLock()
+	defer a.usbStateMu.RUnlock()
+	return a.usbAT
+}
+
 func (a *app) ensureUSBAT() error {
-	if a.demo || a.modem != nil || a.usbAT != nil {
+	if a.demo || a.modem != nil || a.currentUSBAT() != nil {
 		return nil
 	}
 	if a.currentUSBDevice() == nil {
+		a.usbStateMu.Lock()
+		if a.usbAT != nil {
+			a.usbStateMu.Unlock()
+			return nil
+		}
+		a.usbDevice = nil
 		a.port = "未检测到 DJI USB 设备"
 		a.discoveryError = "DJI USB device is not connected"
+		a.usbStateMu.Unlock()
 		return errors.New("DJI USB device is not connected")
 	}
-	if !a.usbATBackoffUntil.IsZero() && time.Now().Before(a.usbATBackoffUntil) {
-		if a.usbATBackoffErr != "" {
-			return fmt.Errorf("USB AT is cooling down after disconnect: %s", a.usbATBackoffErr)
+	a.usbStateMu.Lock()
+	if a.usbAT != nil {
+		a.usbStateMu.Unlock()
+		return nil
+	}
+	backoffUntil := a.usbATBackoffUntil
+	backoffErr := a.usbATBackoffErr
+	if !backoffUntil.IsZero() && time.Now().Before(backoffUntil) {
+		if backoffErr != "" {
+			a.usbStateMu.Unlock()
+			return fmt.Errorf("USB AT is cooling down after disconnect: %s", backoffErr)
 		}
+		a.usbStateMu.Unlock()
 		return errors.New("USB AT is cooling down after disconnect")
 	}
 	dev, err := openDJIUSBAT()
 	if err != nil {
+		a.usbStateMu.Unlock()
 		return err
 	}
+	description := dev.Description()
 	a.usbAT = dev
 	a.usbATBackoffUntil = time.Time{}
 	a.usbATBackoffErr = ""
-	a.port = dev.Description()
+	a.port = description
 	a.discoveryError = ""
-	log.Printf("USB AT bridge opened on DJI %s", dev.Description())
+	a.usbStateMu.Unlock()
+	log.Printf("USB AT bridge opened on DJI %s", description)
 	// The first open may fail while USB is re-enumerating. When a later poll
 	// succeeds, rebuild the eSIM service that startup could not create.
 	a.initUSBATESIMManager()
 	return nil
 }
 
-func (a *app) resetUSBATIfGone(err error) {
-	if err == nil || a.usbAT == nil {
+func (a *app) resetUSBATIfGoneForDevice(err error, dev *usbAT) {
+	if err == nil || dev == nil {
 		return
 	}
 	text := strings.ToUpper(err.Error())
@@ -763,22 +811,34 @@ func (a *app) resetUSBATIfGone(err error) {
 		!strings.Contains(text, "USB AT COMMAND TIMED OUT") {
 		return
 	}
-	a.markUSBATDetached(err.Error())
+	a.markUSBATDetachedForDevice(err.Error(), dev)
 }
 
 // markUSBATDetached clears state belonging to a physically removed module.
 // A later status/SMS poll will discover and open a newly connected module.
 func (a *app) markUSBATDetached(reason string) {
-	if a.usbAT != nil {
-		log.Printf("USB AT bridge detached; waiting for a new enumeration: %s", reason)
-		a.usbAT.Close()
-		a.usbAT = nil
+	a.markUSBATDetachedForDevice(reason, nil)
+}
+
+func (a *app) markUSBATDetachedForDevice(reason string, expected *usbAT) {
+	a.usbStateMu.Lock()
+	if expected != nil && a.usbAT != expected {
+		a.usbStateMu.Unlock()
+		return
 	}
+	detached := a.usbAT
+	a.usbAT = nil
 	a.usbDevice = nil
 	a.port = "未检测到 DJI USB 设备"
 	a.discoveryError = "DJI USB device is not connected"
 	a.usbATBackoffUntil = time.Now().Add(2 * time.Second)
 	a.usbATBackoffErr = reason
+	a.usbStateMu.Unlock()
+
+	if detached != nil {
+		log.Printf("USB AT bridge detached; waiting for a new enumeration: %s", reason)
+		detached.Close()
+	}
 	if manager, _ := a.currentESIMManager(); manager != nil {
 		manager.NotifyModemReset()
 	}
@@ -827,7 +887,7 @@ func (a *app) routes() http.Handler {
 	mux.HandleFunc("POST /api/esim/download", a.downloadESIMProfile)
 	content, _ := fs.Sub(webAssets, "web")
 	mux.Handle("/", http.FileServer(http.FS(content)))
-	return securityHeaders(mux)
+	return securityHeaders(localAPISecurity(mux))
 }
 
 func securityHeaders(next http.Handler) http.Handler {
@@ -841,10 +901,11 @@ func securityHeaders(next http.Handler) http.Handler {
 
 func (a *app) health(w http.ResponseWriter, _ *http.Request) {
 	usbDevice := a.currentUSBDevice()
+	port, discoveryError, _ := a.usbStateSnapshot()
 	esimManager, _ := a.currentESIMManager()
 	writeJSON(w, http.StatusOK, map[string]any{
-		"ok": true, "port": a.port, "esim_available": a.demo || esimManager != nil, "demo": a.demo,
-		"usb_device": usbDevice, "discovery_error": a.discoveryError,
+		"ok": true, "port": port, "esim_available": a.demo || esimManager != nil, "demo": a.demo,
+		"usb_device": usbDevice, "discovery_error": discoveryError,
 	})
 }
 
@@ -873,22 +934,23 @@ func (a *app) status(w http.ResponseWriter, _ *http.Request) {
 	if a.modem == nil {
 		// A libusb handle may survive a physical unplug. Refresh the macOS USB
 		// inventory before using it so the UI never reports a stale connection.
-		if a.usbAT != nil && a.currentUSBDevice() == nil {
-			a.markUSBATDetached("DJI USB device disconnected")
+		if dev := a.currentUSBAT(); dev != nil && a.currentUSBDevice() == nil {
+			a.markUSBATDetachedForDevice("DJI USB device disconnected", dev)
 		}
 		if err := a.ensureUSBAT(); err != nil {
 			log.Printf("USB AT retry failed: %v", err)
 		}
-		if a.usbAT != nil {
-			status, err := a.usbATStatus()
+		if dev := a.currentUSBAT(); dev != nil {
+			status, err := a.usbATStatus(dev)
 			if err == nil {
 				writeJSON(w, http.StatusOK, status)
 				return
 			}
-			a.resetUSBATIfGone(err)
+			a.resetUSBATIfGoneForDevice(err, dev)
 			log.Printf("USB AT status failed: %v", err)
 		}
 		usbDevice := a.currentUSBDevice()
+		_, discoveryError, _ := a.usbStateSnapshot()
 		summary := "未发现 AT 串口"
 		operator := "未连接"
 		network := "不可用"
@@ -903,7 +965,7 @@ func (a *app) status(w http.ResponseWriter, _ *http.Request) {
 			"network_mode":    network,
 			"sim_inserted":    false,
 			"hardware_status": summary,
-			"discovery_error": a.discoveryError,
+			"discovery_error": discoveryError,
 			"usb_device":      usbDevice,
 		})
 		return
@@ -913,27 +975,28 @@ func (a *app) status(w http.ResponseWriter, _ *http.Request) {
 
 func (a *app) currentUSBDevice() *usbDeviceStatus {
 	if a.modem != nil || a.demo {
-		return a.usbDevice
+		_, _, usbDevice := a.usbStateSnapshot()
+		return usbDevice
 	}
-	usbDevice := discoverDJIUSBDevice()
-	// Never retain the last successful scan: that is stale after an unplug.
-	a.usbDevice = usbDevice
-	return usbDevice
+	return cloneUSBDeviceStatus(discoverDJIUSBDevice())
 }
 
-func (a *app) usbATStatus() (modem.DeviceStatus, error) {
-	firmwareResp, _ := a.usbAT.Command("ATI", 3*time.Second)
-	cpinResp, cpinErr := a.usbAT.Command("AT+CPIN?", 3*time.Second)
-	csqResp, _ := a.usbAT.Command("AT+CSQ", 3*time.Second)
-	ceregResp, _ := a.usbAT.Command("AT+CEREG?", 3*time.Second)
-	cregResp, _ := a.usbAT.Command("AT+CREG?", 3*time.Second)
-	_, _ = a.usbAT.Command("AT+COPS=3,2", 3*time.Second)
-	copsResp, _ := a.usbAT.Command("AT+COPS?", 3*time.Second)
-	qccidResp, _ := a.usbAT.Command("AT+QCCID", 3*time.Second)
-	cimiResp, _ := a.usbAT.Command("AT+CIMI", 3*time.Second)
-	cnumResp, _ := a.usbAT.Command("AT+CNUM", 3*time.Second)
-	qnwinfoResp, _ := a.usbAT.Command("AT+QNWINFO", 3*time.Second)
-	usbnetResp, _ := a.usbAT.Command(`AT+QCFG="usbnet"`, 3*time.Second)
+func (a *app) usbATStatus(dev *usbAT) (modem.DeviceStatus, error) {
+	if dev == nil {
+		return modem.DeviceStatus{}, errors.New("AT serial port is unavailable")
+	}
+	firmwareResp, _ := dev.Command("ATI", 3*time.Second)
+	cpinResp, cpinErr := dev.Command("AT+CPIN?", 3*time.Second)
+	csqResp, _ := dev.Command("AT+CSQ", 3*time.Second)
+	ceregResp, _ := dev.Command("AT+CEREG?", 3*time.Second)
+	cregResp, _ := dev.Command("AT+CREG?", 3*time.Second)
+	_, _ = dev.Command("AT+COPS=3,2", 3*time.Second)
+	copsResp, _ := dev.Command("AT+COPS?", 3*time.Second)
+	qccidResp, _ := dev.Command("AT+QCCID", 3*time.Second)
+	cimiResp, _ := dev.Command("AT+CIMI", 3*time.Second)
+	cnumResp, _ := dev.Command("AT+CNUM", 3*time.Second)
+	qnwinfoResp, _ := dev.Command("AT+QNWINFO", 3*time.Second)
+	usbnetResp, _ := dev.Command(`AT+QCFG="usbnet"`, 3*time.Second)
 
 	if cpinErr != nil {
 		return modem.DeviceStatus{}, cpinErr
@@ -1090,8 +1153,11 @@ func parseUSBATQNWInfo(resp string) (mode, duplex, band string, channel uint32) 
 	return mode, duplex, band, channel
 }
 
-func (a *app) readUSBATSMS() ([]receivedSMS, error) {
-	if _, err := a.usbAT.Command("AT+CMGF=0", 3*time.Second); err != nil {
+func (a *app) readUSBATSMS(dev *usbAT) ([]receivedSMS, error) {
+	if dev == nil {
+		return nil, errors.New("AT serial port is unavailable")
+	}
+	if _, err := dev.Command("AT+CMGF=0", 3*time.Second); err != nil {
 		return nil, fmt.Errorf("set SMS PDU mode: %w", err)
 	}
 	memories := []string{"SM", "ME"}
@@ -1099,7 +1165,7 @@ func (a *app) readUSBATSMS() ([]receivedSMS, error) {
 	messages := make([]receivedSMS, 0)
 	var errs []string
 	for _, memory := range memories {
-		items, err := a.readUSBATSMSFromMemory(memory)
+		items, err := a.readUSBATSMSFromMemory(dev, memory)
 		if err != nil {
 			errs = append(errs, fmt.Sprintf("%s: %v", memory, err))
 			continue
@@ -1123,11 +1189,11 @@ func (a *app) readUSBATSMS() ([]receivedSMS, error) {
 	return messages, nil
 }
 
-func (a *app) readUSBATSMSFromMemory(memory string) ([]receivedSMS, error) {
-	if _, err := a.usbAT.Command(fmt.Sprintf(`AT+CPMS="%s","%s","%s"`, memory, memory, memory), 5*time.Second); err != nil {
+func (a *app) readUSBATSMSFromMemory(dev *usbAT, memory string) ([]receivedSMS, error) {
+	if _, err := dev.Command(fmt.Sprintf(`AT+CPMS="%s","%s","%s"`, memory, memory, memory), 5*time.Second); err != nil {
 		return nil, fmt.Errorf("select storage: %w", err)
 	}
-	resp, err := a.usbAT.Command("AT+CMGL=4", 15*time.Second)
+	resp, err := dev.Command("AT+CMGL=4", 15*time.Second)
 	if err != nil {
 		return nil, fmt.Errorf("list SMS: %w", err)
 	}
@@ -1166,15 +1232,23 @@ func (a *app) readUSBATSMSFromMemory(memory string) ([]receivedSMS, error) {
 }
 
 func (a *app) clearUSBATSMSMemory(memory string) (before, after int, err error) {
-	resp, err := a.usbAT.Command(fmt.Sprintf(`AT+CPMS="%s","%s","%s"`, memory, memory, memory), 5*time.Second)
+	dev := a.currentUSBAT()
+	return a.clearUSBATSMSMemoryForDevice(dev, memory)
+}
+
+func (a *app) clearUSBATSMSMemoryForDevice(dev *usbAT, memory string) (before, after int, err error) {
+	if dev == nil {
+		return 0, 0, errors.New("AT serial port is unavailable")
+	}
+	resp, err := dev.Command(fmt.Sprintf(`AT+CPMS="%s","%s","%s"`, memory, memory, memory), 5*time.Second)
 	if err != nil {
 		return 0, 0, fmt.Errorf("select storage: %w", err)
 	}
 	before = parseUSBATCPMSUsed(resp)
-	if _, err := a.usbAT.Command("AT+CMGD=1,4", 20*time.Second); err != nil {
+	if _, err := dev.Command("AT+CMGD=1,4", 20*time.Second); err != nil {
 		return before, 0, fmt.Errorf("delete messages: %w", err)
 	}
-	resp, err = a.usbAT.Command(fmt.Sprintf(`AT+CPMS="%s","%s","%s"`, memory, memory, memory), 5*time.Second)
+	resp, err = dev.Command(fmt.Sprintf(`AT+CPMS="%s","%s","%s"`, memory, memory, memory), 5*time.Second)
 	if err != nil {
 		return before, 0, fmt.Errorf("recheck storage: %w", err)
 	}
@@ -1340,12 +1414,13 @@ func (a *app) runATCommand(command string, timeout time.Duration) (string, error
 		if err := a.ensureUSBAT(); err != nil {
 			return "", err
 		}
-		if a.usbAT == nil {
+		dev := a.currentUSBAT()
+		if dev == nil {
 			return "", errors.New("AT serial port is unavailable")
 		}
-		response, err := a.usbAT.Command(command, timeout)
+		response, err := dev.Command(command, timeout)
 		if err != nil {
-			a.resetUSBATIfGone(err)
+			a.resetUSBATIfGoneForDevice(err, dev)
 		}
 		return response, err
 	}
@@ -1404,13 +1479,14 @@ func (a *app) sendUSBATSMS(phone, message string) (int, error) {
 	if err := a.ensureUSBAT(); err != nil {
 		return 0, err
 	}
-	if a.usbAT == nil {
+	dev := a.currentUSBAT()
+	if dev == nil {
 		return 0, errors.New("AT serial port is unavailable")
 	}
 
-	modeResponse, err := a.usbAT.Command("AT+CMGF=0", 5*time.Second)
+	modeResponse, err := dev.Command("AT+CMGF=0", 5*time.Second)
 	if err != nil {
-		a.resetUSBATIfGone(err)
+		a.resetUSBATIfGoneForDevice(err, dev)
 		return 0, fmt.Errorf("set SMS PDU mode: %w", err)
 	}
 	if !atProbeSucceeded(modeResponse) {
@@ -1424,13 +1500,13 @@ func (a *app) sendUSBATSMS(phone, message string) (int, error) {
 	for i, tpdu := range tpdus {
 		pdu := append([]byte{0x00}, tpdu...)
 		payload := []byte(strings.ToUpper(hex.EncodeToString(pdu)) + "\x1a")
-		response, sendErr := a.usbAT.CommandWithPrompt(
+		response, sendErr := dev.CommandWithPrompt(
 			fmt.Sprintf("AT+CMGS=%d", tpduLengths[i]),
 			payload,
 			45*time.Second,
 		)
 		if sendErr != nil {
-			a.resetUSBATIfGone(sendErr)
+			a.resetUSBATIfGoneForDevice(sendErr, dev)
 			return i, fmt.Errorf("send SMS segment %d/%d: %w", i+1, len(tpdus), sendErr)
 		}
 		if atResponseIsError(response) || !strings.Contains(response, "+CMGS:") || !atProbeSucceeded(response) {
@@ -2570,9 +2646,10 @@ func (a *app) esimHealth(w http.ResponseWriter, _ *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, err.Error())
 		return
 	}
-	status, err := a.usbATStatus()
+	dev := a.currentUSBAT()
+	status, err := a.usbATStatus(dev)
 	if err != nil {
-		a.resetUSBATIfGone(err)
+		a.resetUSBATIfGoneForDevice(err, dev)
 		writeError(w, http.StatusBadGateway, err.Error())
 		return
 	}
