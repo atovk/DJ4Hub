@@ -1,6 +1,8 @@
 # DJ 4G Hub · 原生 macOS 客户端
 
-SwiftUI 原生界面，不使用 WebView。短信、电话、eSIM、网络与 AT 操作复用 Go 服务；Web 保留独立运行。4G Connect 子仓库未改动。
+SwiftUI 原生界面，不使用 WebView。短信、电话、eSIM、网络与 AT 操作复用 Go 服务；Web 保留独立运行。4G Connect 子仓库未改动，构建原生 App 不需要初始化该 submodule。
+
+Release 中原生 App 与便携 ZIP 是两种产物：`DJ-4G-Hub-macOS-<arch>-App-<tag>.zip` 解压后是 `DJ 4G Hub.app`；`DJ-4G-Hub-macOS-<arch>-<tag>.zip` 是命令行/Web 便携包。
 
 ## 通信记录云盘备份
 
@@ -18,15 +20,25 @@ SwiftUI 原生界面，不使用 WebView。短信、电话、eSIM、网络与 AT
 
 ## 构建
 
-需要 Apple Silicon、macOS 13+、Xcode Command Line Tools、Go 与便携包构建所需依赖。
+需要 Intel Mac 或 Apple Silicon Mac、macOS 13+、Xcode Command Line Tools、Go 与便携包构建所需依赖。Swift 单元测试还需要完整 Xcode 提供 XCTest；只有 Command Line Tools 时可使用 `SKIP_SWIFT_TESTS=1` 构建 App，完整测试由 GitHub CI 执行。原生 App 必须使用同架构的便携后端包构建：Intel 使用 `amd64`，Apple Silicon 使用 `arm64`。
 
 ```sh
-sh scripts/package-macos-arm64.sh native-backend
-PKG_CONFIG_PATH="$TMPDIR/dj4ghub-macos-package-arm64/libusb-source" \
-  sh scripts/package-macos-app.sh dist/release/DJ-4G-Hub-macOS-arm64-native-backend
+sh scripts/package-macos.sh native-backend arm64
+sh scripts/package-macos-app.sh \
+  "$PWD/dist/release/DJ-4G-Hub-macOS-arm64-native-backend" \
+  "$PWD/dist/native/DJ 4G Hub.app"
 ```
 
-输出 `dist/native/DJ 4G Hub.app`。目标已存在时不会覆盖，可用第二个参数指定新的绝对 `.app` 路径。应用仅本地 ad-hoc 签名，未公证，不代表可对外正式发行。
+Intel Mac 上把示例中的 `arm64` 换成 `amd64`。`scripts/package-macos-app.sh` 会检查 Swift 可执行文件、内置 Go 后端和 `libusb` 是否为同一单架构。输出 `dist/native/DJ 4G Hub.app`。目标已存在时不会覆盖，可用第二个参数指定新的绝对 `.app` 路径。应用仅本地 ad-hoc 签名，未公证，不代表可对外正式发行，也不代表两种架构上的硬件、音频、休眠恢复和长时间通话都已完成验收。
+
+推送 `v*` 标签时，GitHub Release 工作流会分别在 Intel amd64 与 Apple Silicon arm64 runner 上测试并生成：
+
+```text
+DJ-4G-Hub-macOS-amd64-App-<tag>.zip
+DJ-4G-Hub-macOS-amd64-App-<tag>.zip.sha256
+DJ-4G-Hub-macOS-arm64-App-<tag>.zip
+DJ-4G-Hub-macOS-arm64-App-<tag>.zip.sha256
+```
 
 ## 使用
 

@@ -5,32 +5,125 @@ on:
     tags: ['v*']
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
-  release-macos-arm64:
-    runs-on: macos-14
+  release-macos:
+    timeout-minutes: 45
+    name: Build macOS ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: macos-15-intel
+          - arch: arm64
+            runner: macos-15
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
           cache: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          package-manager-cache: false
       - name: Install build dependencies
         run: brew install pkg-config libusb
-      - name: Test
+      - name: Check scripts
+        run: for script in packaging/dj4ghub packaging/install scripts/*.sh; do sh -n "$script"; done
+      - name: Vet
+        run: go vet ./...
+      - name: Test Go
         run: go test ./...
-        env:
-          PKG_CONFIG_PATH: /opt/homebrew/lib/pkgconfig
+      - name: Race test Go
+        run: go test -race ./...
+      - name: Test native app
+        run: swift test --package-path apps/hub-macos
+      - name: Test web audio
+        run: node --test scripts/phone-audio.test.cjs
       - name: Build release archive
-        run: ./scripts/package-macos-arm64.sh "${GITHUB_REF_NAME}"
-      - name: Publish GitHub Release
-        env:
-          GH_TOKEN: ${{ github.token }}
+        run: ./scripts/package-macos.sh "${GITHUB_REF_NAME}" "${{ matrix.arch }}"
+      - name: Build native app archive
         run: |
           version="${GITHUB_REF_NAME}"
-          gh release create "${GITHUB_REF_NAME}" \
-            "dist/release/DJ-4G-Hub-macOS-arm64-${version}.zip" \
-            "dist/release/DJ-4G-Hub-macOS-arm64-${version}.zip.sha256" \
+          arch="${{ matrix.arch }}"
+          app_version="${version#v}"
+          app_version="${app_version%%-*}"
+          app_build="${GITHUB_RUN_NUMBER}.${GITHUB_RUN_ATTEMPT}"
+          package_dir="${PWD}/dist/release/DJ-4G-Hub-macOS-${arch}-${version}"
+          app_path="${PWD}/dist/release/DJ 4G Hub.app"
+          app_zip="${PWD}/dist/release/DJ-4G-Hub-macOS-${arch}-App-${version}.zip"
+          APP_VERSION="${app_version}" APP_BUILD="${app_build}" SKIP_SWIFT_TESTS=1 ./scripts/package-macos-app.sh "${package_dir}" "${app_path}"
+          ditto -c -k --keepParent --norsrc --noextattr --noqtn --noacl "${app_path}" "${app_zip}"
+          (
+            cd dist/release
+            shasum -a 256 "$(basename -- "${app_zip}")" >"$(basename -- "${app_zip}").sha256"
+          )
+          codesign --verify --deep --strict "${app_path}"
+      - name: Verify and start the archived packages
+        run: |
+          portable="DJ-4G-Hub-macOS-${{ matrix.arch }}-${GITHUB_REF_NAME}"
+          app="DJ-4G-Hub-macOS-${{ matrix.arch }}-App-${GITHUB_REF_NAME}"
+          extracted="${RUNNER_TEMP}/dj4hub-release-smoke"
+          mkdir -p "${extracted}"
+          ditto -x -k "dist/release/${portable}.zip" "${extracted}"
+          ditto -x -k "dist/release/${app}.zip" "${extracted}"
+          ./scripts/smoke-macos-package.sh "${extracted}/${portable}"
+          ./scripts/smoke-macos-package.sh "${extracted}/DJ 4G Hub.app"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: macos-${{ matrix.arch }}-release
+          path: |
+            dist/release/DJ-4G-Hub-macOS-${{ matrix.arch }}-${{ github.ref_name }}.zip
+            dist/release/DJ-4G-Hub-macOS-${{ matrix.arch }}-${{ github.ref_name }}.zip.sha256
+            dist/release/DJ-4G-Hub-macOS-${{ matrix.arch }}-App-${{ github.ref_name }}.zip
+            dist/release/DJ-4G-Hub-macOS-${{ matrix.arch }}-App-${{ github.ref_name }}.zip.sha256
+          if-no-files-found: error
+
+  publish:
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    name: Publish GitHub Release
+    needs: release-macos
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: release-assets
+          merge-multiple: true
+      - name: Verify collected assets
+        run: |
+          expected=8
+          actual=$(find release-assets -type f | wc -l | tr -d ' ')
+          if [ "${actual}" != "${expected}" ]; then
+            find release-assets -maxdepth 2 -type f -print
+            echo "Expected ${expected} release files, got ${actual}." >&2
+            exit 1
+          fi
+          cd release-assets
+          for checksum in *.sha256; do sha256sum -c "${checksum}"; done
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          version="${GITHUB_REF_NAME}"
+          prerelease_args=
+          case "${version}" in
+            *preview*|*alpha*|*beta*|*rc*) prerelease_args=--prerelease ;;
+          esac
+          gh release create "${version}" release-assets/* \
+            --draft \
+            --verify-tag \
+            ${prerelease_args} \
             --generate-notes \
             --title "DJ 4G Hub ${version}"
+          gh release edit "${version}" --draft=false

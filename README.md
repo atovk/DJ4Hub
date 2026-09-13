@@ -23,7 +23,7 @@ DJ 4G Hub 是一个本地优先的 macOS 设备控制台，支持兼容的 **DJI
 | 来电／短信提醒 | macOS 系统通知和提示音；Web 提示音需单独开启 |
 | 界面与识别修复 | 原生控件与点击区域优化、Web APN 自定义下拉、兼容 ICCID 末尾填充字符 |
 
-原生 App 当前为 **Apple Silicon / macOS 13+ 开发预览**，本地签名、未公证。打包成功不等于长期音频稳定性已验收；新功能源码也不代表 GitHub Release 已更新。
+原生 App 当前为 **macOS 13+ 开发预览**，Release 流程同时构建 Intel amd64 与 Apple Silicon arm64 包，本地签名、未公证。打包成功不等于 Intel/ARM 硬件功能都已完整实测，也不代表长期音频稳定性已验收；新功能源码也不代表 GitHub Release 已更新。
 
 - [原生客户端：构建、启动与云盘备份](apps/hub-macos/README.md)
 - [通信记录：卡片归属、SQLite 迁移与限制](docs/COMMUNICATION_HISTORY.md)
@@ -60,20 +60,20 @@ DJ 4G Hub 最初从 [ZenGeekLabs/DJOneHub](https://github.com/ZenGeekLabs/DJOneH
 
 ## 相关项目
 
-4G Connect 是独立开发、独立发布的 MIT 项目。本仓库只通过 Git submodule 固定一个经过验证的版本，方便一起检出和联调，不将其源码、提交、Issue、Actions、Release 或许可证合并进 DJ 4G Hub。
+4G Connect 是独立开发、独立发布的 MIT 项目。本仓库只通过 Git submodule 固定一个经过验证的版本，方便一起检出和联调，不将其源码、提交、Issue、Actions、Release 或许可证合并进 DJ 4G Hub。构建、测试和打包 DJ 4G Hub 不需要初始化这个 submodule；只有需要联调 4G Connect 本身时才需要取回。
 
 | 项目 | 位置 | 用途 | 维护方式 |
 | --- | --- | --- | --- |
 | DJ 4G Hub | 当前仓库 | 完整设备控制台：短信、eSIM、网络、流量和 AT 调试 | 当前仓库独立维护 |
 | [4G Connect](https://github.com/WongLoki/4G-Connect) | `apps/4g-connect` submodule | 双击即用的一次性 USB 网卡激活 App | 独立仓库、MIT License |
 
-克隆时需要同时取回子仓库：
+克隆 DJ 4G Hub：
 
 ```sh
-git clone --recurse-submodules https://github.com/WongLoki/DJ4Hub.git
+git clone https://github.com/atovk/DJ4Hub.git
 ```
 
-已经克隆主仓库时：
+如需联调独立的 4G Connect，再取回子仓库：
 
 ```sh
 git submodule update --init --recursive
@@ -91,7 +91,7 @@ git submodule update --init --recursive
 - 一次性 `activate` 工具：清理残留网络服务、确认 `usbnet=1`、重启模块并等待 macOS DHCP。
 - 实时上下行速度、本次会话流量、USB 网卡、默认出口和代理诊断。
 - 联网链路识别，例如 `en9 → utun → 应用`，并展示应用、目标地址、端口、协议和累计流量。
-- 本地服务启动器、日志管理、Apple Silicon 发行包和 GitHub Actions 自动构建。
+- 本地服务启动器、日志管理、Intel amd64 / Apple Silicon arm64 发行包和 GitHub Actions 自动构建。
 
 ## 功能状态
 
@@ -118,8 +118,8 @@ Web 电话页面默认自动使用电脑通话音频：首次拨号提示允许�
 | USB 4G 上网 | 可用 | 切换 USB 网卡模式，恢复 DHCP，并通过百度、Google 等多个地址自动验证公网 |
 | 联网活动 | 可用 | 展示连接元数据，不读取 HTTPS 页面内容 |
 | AT 调试 | 可用 | 直接向模块发送 AT 指令 |
-| Apple Silicon | 可用 | 当前发行包面向 macOS 13+、M 系列芯片 |
-| Intel Mac | 未验证 | 尚未发布经过真机验证的发行包 |
+| Apple Silicon | 可用 | Release 流程生成 arm64 包；硬件功能仍以实际测试记录为准 |
+| Intel Mac | 预览 | Release 流程生成 amd64 包；不要理解为所有功能已完成 Intel 真机验收 |
 | iPhone / iPad | 规划中 | 需要独立的移动端架构、权限和安全设计 |
 
 ## 硬件与系统
@@ -127,7 +127,7 @@ Web 电话页面默认自动使用电脑通话音频：首次拨号提示允许�
 - 受支持的 DJI 4G 模块，常见 USB 标识为 `2ca3:4006`
 - 可用的实体 SIM，或兼容的实体 eUICC/eSIM 卡片
 - 支持数据传输的 USB-C 线缆
-- Apple Silicon Mac
+- Intel Mac 或 Apple Silicon Mac
 - macOS 13 Ventura 或更新版本
 
 发行包会携带所需的 `libusb`。普通用户不需要安装 Go、Node.js 或 Homebrew。
@@ -152,10 +152,16 @@ Web 电话页面默认自动使用电脑通话音频：首次拨号提示允许�
 
 ## 下载与安装
 
-**原生 App：** 当前请按[构建说明](apps/hub-macos/README.md#构建)生成 `DJ 4G Hub.app`，可复制到“应用程序”。以下 ZIP 安装流程是便携 Web 服务，不要与原生 App 混淆。
+**原生 App：** 从项目 [Releases](https://github.com/atovk/DJ4Hub/releases) 下载名称类似 `DJ-4G-Hub-macOS-arm64-App-vX.Y.Z.zip` 或 `DJ-4G-Hub-macOS-amd64-App-vX.Y.Z.zip` 的包，解压后得到 `DJ 4G Hub.app`，可复制到“应用程序”。原生 App 是 SwiftUI 应用，内置后端服务，不是便携命令行目录。
 
+**便携 ZIP：** 下载名称类似 `DJ-4G-Hub-macOS-arm64-vX.Y.Z.zip` 或 `DJ-4G-Hub-macOS-amd64-vX.Y.Z.zip` 的包，并按需使用同名 `.sha256` 校验文件。便携包包含 `dj4ghub` 命令、后端二进制、libusb、安装器和许可证文件，可安装到 `/usr/local`，也可在解压目录免安装运行。只需要一次性激活工具时，请前往 [4G Connect Releases](https://github.com/WongLoki/4G-Connect/releases)。
 
-从项目 [Releases](https://github.com/WongLoki/DJ4Hub/releases) 下载名称包含 `DJ-4G-Hub-macOS-arm64` 的 ZIP，并按需使用同名 `.sha256` 校验文件。只需要一次性激活工具时，请前往 [4G Connect Releases](https://github.com/WongLoki/4G-Connect/releases)。
+选择与 Mac 匹配的架构：
+
+| Mac | 便携包 | 原生 App |
+| --- | --- | --- |
+| Apple Silicon / M 系列 | `DJ-4G-Hub-macOS-arm64-<tag>.zip` | `DJ-4G-Hub-macOS-arm64-App-<tag>.zip` |
+| Intel | `DJ-4G-Hub-macOS-amd64-<tag>.zip` | `DJ-4G-Hub-macOS-amd64-App-<tag>.zip` |
 
 ```sh
 shasum -a 256 DJ-4G-Hub-*.zip
@@ -269,8 +275,10 @@ Profile 号码备注会兼容读取旧的 `DJOneHub` 和 `VoHive macOS` 数据�
 ```sh
 go test ./...
 ./scripts/build-macos.sh
-./scripts/package-macos-arm64.sh v0.1.0-preview
+./scripts/package-macos.sh v0.1.0-preview "$(go env GOARCH)"
 ```
+
+Release 包要求在目标架构的 Mac 上构建：Apple Silicon 构建 `arm64`，Intel Mac 构建 `amd64`。
 
 主要目录：
 
@@ -281,10 +289,23 @@ apps/4g-connect/         独立 4G Connect 仓库的 submodule 引用
 internal/                设备后端、短信、eSIM 与配置能力
 pkg/                     MBIM、短信编码和日志组件
 packaging/               安装器、启动器与发行说明
-scripts/                 本地构建和 Apple Silicon 打包脚本
+scripts/                 本地构建和 Intel/Apple Silicon 打包脚本
 ```
 
-DJ 4G Hub 在本仓库运行测试与发布流程，推送 `v*` 标签时构建 Release。4G Connect 在自己的仓库中运行独立 Actions 和发布流程。
+DJ 4G Hub 在本仓库运行测试与发布流程。CI 在 Intel amd64 与 Apple Silicon arm64 macOS runner 上执行 Go vet、Go 单元测试、race 测试、Swift 测试、Web 音频测试和对应架构构建。推送 `v*` 标签时，Release 工作流在两种架构上重复测试，然后生成并上传便携 ZIP 与原生 App ZIP：
+
+```text
+DJ-4G-Hub-macOS-amd64-<tag>.zip
+DJ-4G-Hub-macOS-amd64-<tag>.zip.sha256
+DJ-4G-Hub-macOS-amd64-App-<tag>.zip
+DJ-4G-Hub-macOS-amd64-App-<tag>.zip.sha256
+DJ-4G-Hub-macOS-arm64-<tag>.zip
+DJ-4G-Hub-macOS-arm64-<tag>.zip.sha256
+DJ-4G-Hub-macOS-arm64-App-<tag>.zip
+DJ-4G-Hub-macOS-arm64-App-<tag>.zip.sha256
+```
+
+4G Connect 在自己的仓库中运行独立 Actions 和发布流程。
 
 ## 移动设备路线图
 
@@ -299,7 +320,7 @@ DJ 4G Hub 在本仓库运行测试与发布流程，推送 `v*` 标签时构建 
 
 ## 当前限制
 
-- 发行包目前只支持 Apple Silicon。
+- Release 流程生成 Intel amd64 与 Apple Silicon arm64 包，但不要将包已生成理解为两类硬件上的所有设备、电话、音频和休眠场景都已实测。
 - 不同 SIM、eUICC、运营商、漫游环境和模块固件可能存在差异。
 - 联网活动只显示连接元数据，不能看到 HTTPS 内容，也不等同于运营商账单。
 - 当前发行包使用临时签名，尚未经过 Apple Developer ID 公证。

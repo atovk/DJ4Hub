@@ -1,6 +1,8 @@
-# DJ 4G Hub for macOS（Apple Silicon）
+# DJ 4G Hub for macOS（便携 ZIP）
 
-这是 DJ 4G Hub 的完整便携发行包，已经包含程序、启动器和 `libusb`，无需安装 Go 或 Homebrew。
+这是 DJ 4G Hub 的完整便携发行包，已经包含程序、启动器和 `libusb`，无需安装 Go 或 Homebrew。请使用与 Mac 匹配的包：Apple Silicon 使用 `arm64`，Intel 使用 `amd64`。两者均要求 macOS 13 或更新版本。
+
+这个 ZIP 是命令行/Web 服务包，不是原生 `DJ 4G Hub.app`。如果你下载的是 `DJ-4G-Hub-macOS-<arch>-App-<tag>.zip`，解压后应得到原生 App，可直接拖入“应用程序”。
 
 ## 安装
 
@@ -30,6 +32,8 @@ dj4ghub stop
 ./dj4ghub start
 ```
 
+免安装模式会从当前发行包目录运行；不要只移动单个 `dj4ghub` 文件，因为后端二进制、`libusb` 和许可证文件也在同一目录结构中。
+
 ## 常用命令
 
 ```text
@@ -58,7 +62,7 @@ dj4ghub start
 
 ## macOS 安全提示
 
-当前预览包尚未经过 Apple Developer ID 公证。请优先核对 Release 提供的 SHA-256。若 macOS 仍阻止已确认来源的文件，可在当前发行包目录执行：
+当前预览包使用 ad-hoc 签名，尚未经过 Apple Developer ID 公证。请优先核对 GitHub Release 提供的 SHA-256。若 macOS 仍阻止已确认来源的文件，可在当前发行包目录执行：
 
 ```sh
 xattr -dr com.apple.quarantine ./dj4ghub ./bin ./lib
@@ -72,3 +76,9 @@ xattr -dr com.apple.quarantine ./dj4ghub ./bin ./lib
 ```
 
 项目来源、非官方声明和许可证信息请查看仓库根目录的 `README.md`、`LICENSE` 与 `THIRD_PARTY_NOTICES.md`。
+
+Release 下载页：
+
+```text
+https://github.com/atovk/DJ4Hub/releases
+```

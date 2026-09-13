@@ -35,6 +35,12 @@ func newTestManagerWithOverviewLoader(loader func() (*EsimOverview, error)) *Man
 	}
 }
 
+func managerHardwareDiscoveryCacheSnapshotForTest(mgr *Manager) (*EUICCChipInfo, []EUICCInfo) {
+	mgr.cacheMu.RLock()
+	defer mgr.cacheMu.RUnlock()
+	return cloneChipInfo(mgr.chipInfoCache), append([]EUICCInfo(nil), mgr.discoveredEUICCs...)
+}
+
 func newManagerWithChannelFactory(
 	deviceID string,
 	channelFactory func(aid []byte) (*lpa.Client, error),
@@ -1461,11 +1467,12 @@ func TestNotifyModemResetDelayedClearsCacheImmediatelyAndReloadsAfterDelay(t *te
 	if mgr.cachedOverview() != nil {
 		t.Fatal("overview cache should be cleared immediately")
 	}
-	if mgr.chipInfoCache != nil {
+	chipInfo, discoveredEUICCs := managerHardwareDiscoveryCacheSnapshotForTest(mgr)
+	if chipInfo != nil {
 		t.Fatal("chipInfoCache should be cleared immediately")
 	}
-	if len(mgr.discoveredEUICCs) != 0 {
-		t.Fatalf("discoveredEUICCs = %v, want cleared", mgr.discoveredEUICCs)
+	if len(discoveredEUICCs) != 0 {
+		t.Fatalf("discoveredEUICCs = %v, want cleared", discoveredEUICCs)
 	}
 	select {
 	case <-loaded:
@@ -1501,11 +1508,12 @@ func TestNotifyModemResetDelayedSkipsReloadDuringSwitchSuppressionWindow(t *test
 	if got := mgr.cachedOverview(); got != nil {
 		t.Fatalf("cachedOverview() = %#v, want cleared during reset suppression window", got)
 	}
-	if mgr.chipInfoCache != nil {
-		t.Fatalf("chipInfoCache = %#v, want cleared during reset suppression window", mgr.chipInfoCache)
+	chipInfo, discoveredEUICCs := managerHardwareDiscoveryCacheSnapshotForTest(mgr)
+	if chipInfo != nil {
+		t.Fatalf("chipInfoCache = %#v, want cleared during reset suppression window", chipInfo)
 	}
-	if len(mgr.discoveredEUICCs) != 0 {
-		t.Fatalf("discoveredEUICCs = %v, want cleared during reset suppression window", mgr.discoveredEUICCs)
+	if len(discoveredEUICCs) != 0 {
+		t.Fatalf("discoveredEUICCs = %v, want cleared during reset suppression window", discoveredEUICCs)
 	}
 }
 

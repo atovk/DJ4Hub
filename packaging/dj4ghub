@@ -3,14 +3,14 @@ set -u
 
 SOURCE=$0
 while [ -L "${SOURCE}" ]; do
-  SOURCE_DIR=$(CDPATH= cd -P -- "$(dirname -- "${SOURCE}")" && pwd)
+  SOURCE_DIR=$(CDPATH='' cd -P -- "$(dirname -- "${SOURCE}")" && pwd)
   SOURCE=$(readlink "${SOURCE}")
   case "${SOURCE}" in
     /*) ;;
     *) SOURCE="${SOURCE_DIR}/${SOURCE}" ;;
   esac
 done
-ROOT_DIR=$(CDPATH= cd -P -- "$(dirname -- "${SOURCE}")" && pwd)
+ROOT_DIR=$(CDPATH='' cd -P -- "$(dirname -- "${SOURCE}")" && pwd)
 BINARY="${ROOT_DIR}/bin/dj4ghub-macos"
 URL="http://127.0.0.1:7575"
 DATA_DIR="${HOME}/Library/Application Support/DJ 4G Hub"
@@ -73,8 +73,10 @@ start_service() {
     printf '启动失败：缺少可执行文件 %s\n' "${BINARY}" >&2
     exit 1
   fi
-  if [ "$(uname -m)" != "arm64" ]; then
-    printf '当前发行包仅支持 Apple Silicon（M 系列芯片）。\n' >&2
+  if [ "$(uname -s)" != "Darwin" ] ||
+    ! /usr/bin/lipo "${BINARY}" -verify_arch "$(uname -m)" >/dev/null 2>&1 ||
+    ! /usr/bin/lipo "${ROOT_DIR}/lib/libusb-1.0.0.dylib" -verify_arch "$(uname -m)" >/dev/null 2>&1; then
+    printf '请使用与本机芯片匹配的 macOS 发行包（Intel: amd64；Apple Silicon: arm64）。\n' >&2
     exit 1
   fi
 

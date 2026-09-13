@@ -11,7 +11,7 @@ EG25-G. It does not require UTM for AT-mode management.
 - Execute explicit AT commands
 - Read and switch physical eUICC profiles through AT APDU transport
 - Local management page at `http://127.0.0.1:7575`
-- Packaged Apple Silicon release (Intel packaging is planned separately)
+- Packaged Intel amd64 and Apple Silicon arm64 releases
 
 The cellular data interface remains managed by macOS. This allows macOS to use
 the dongle as its network connection while DJ 4G Hub uses a separate USB serial
@@ -19,9 +19,27 @@ interface for management.
 
 ## Downloaded release
 
-The Apple Silicon ZIP contains the executable, its libusb runtime, licenses and
-the `dj4ghub` terminal launcher. It does not require Go, Homebrew or a separately
-installed libusb on the user's Mac.
+DJ 4G Hub publishes two macOS artifact families for each `v*` tag:
+
+- `DJ-4G-Hub-macOS-<arch>-<tag>.zip` is the portable command-line/Web service
+  package. It contains the executable, its libusb runtime, licenses, installer
+  and the `dj4ghub` terminal launcher.
+- `DJ-4G-Hub-macOS-<arch>-App-<tag>.zip` contains the native SwiftUI
+  `DJ 4G Hub.app`, with the matching backend bundled inside the app.
+
+Use `arm64` for Apple Silicon Macs and `amd64` for Intel Macs. Both require
+macOS 13 or newer. The artifacts are ad-hoc signed and not notarized. A package
+being built for an architecture does not mean every hardware, call-audio,
+sleep/wake or long-running scenario has been verified on that architecture.
+
+Download artifacts from:
+
+```text
+https://github.com/atovk/DJ4Hub/releases
+```
+
+The portable ZIP does not require Go, Homebrew or a separately installed libusb
+on the user's Mac.
 
 From the extracted release directory:
 
@@ -40,19 +58,61 @@ Requirements:
 
 - macOS 13 or newer
 - Go 1.26 or newer
+- Xcode Command Line Tools
+- `pkg-config`, `curl` and `lipo`
+
+The release package must be built on the same architecture as the target:
+
+```sh
+./scripts/package-macos.sh v0.1.0-preview arm64
+./scripts/package-macos.sh v0.1.0-preview amd64
+```
+
+The architecture-specific wrapper scripts remain available:
 
 ```sh
 ./scripts/package-macos-arm64.sh v0.1.0-preview
+./scripts/package-macos-amd64.sh v0.1.0-preview
 ```
 
-Release outputs:
+Portable package outputs:
 
-- `dist/release/DJ-4G-Hub-macOS-arm64-v0.1.0-preview/`
-- `dist/release/DJ-4G-Hub-macOS-arm64-v0.1.0-preview.zip`
-- `dist/release/DJ-4G-Hub-macOS-arm64-v0.1.0-preview.zip.sha256`
+- `dist/release/DJ-4G-Hub-macOS-<arch>-v0.1.0-preview/`
+- `dist/release/DJ-4G-Hub-macOS-<arch>-v0.1.0-preview.zip`
+- `dist/release/DJ-4G-Hub-macOS-<arch>-v0.1.0-preview.zip.sha256`
+
+Build the native app from an existing portable backend package:
+
+```sh
+./scripts/package-macos-app.sh \
+  "$PWD/dist/release/DJ-4G-Hub-macOS-arm64-v0.1.0-preview" \
+  "$PWD/dist/native/DJ 4G Hub.app"
+```
+
+Use the matching `amd64` backend directory on Intel Macs. The app packager
+checks that the Swift binary, backend binary and bundled libusb all use the same
+single architecture.
 
 The packaging script downloads the official libusb source archive, verifies its
-SHA-256, builds it for macOS 13 or newer and bundles the resulting runtime.
+SHA-256, builds it for macOS 13 or newer and bundles the resulting runtime. The
+DJ 4G Hub packaging flow does not require the 4G Connect submodule.
+
+## CI and release flow
+
+GitHub CI runs on both `macos-15-intel` and `macos-15`:
+
+- shell syntax checks for packaging scripts
+- `go vet ./...`
+- `go test ./...`
+- `go test -race ./...`
+- `./scripts/build-macos.sh <arch>`
+- `swift test --package-path apps/hub-macos`
+- `node --test scripts/phone-audio.test.cjs`
+
+Pushing a `v*` tag runs the release workflow on both architectures, repeats the
+tests, builds the portable package with `./scripts/package-macos.sh <tag> <arch>`,
+builds the native app ZIP from that backend package, writes SHA-256 files, and
+uploads all artifacts to the GitHub Release.
 
 ## Run
 

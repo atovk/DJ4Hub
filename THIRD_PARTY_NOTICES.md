@@ -30,3 +30,8 @@ The source repository includes vendored dependencies under `third_party/` so the
 | multierr | `third_party/multierr/LICENSE.txt` |
 
 Dependencies fetched through Go modules retain their own licenses and copyright notices. This file is informational and does not replace any component's full license text.
+
+Release packages collect the license texts of the Go modules actually linked
+into the backend under `licenses/go/`. The accompanying `GO-LICENSES.txt`
+records module versions, local replacements and license locations. Native App
+bundles retain this directory under `Contents/Resources/licenses/`.

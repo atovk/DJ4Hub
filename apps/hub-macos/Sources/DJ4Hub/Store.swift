@@ -65,7 +65,10 @@ enum HubPage: String, CaseIterable, Identifiable {
     }
     func start() async {
         notifications.configure()
-        await notifications.authorize()
+        // An unanswered permission prompt must not block the device service.
+        if !ProcessInfo.processInfo.arguments.contains("--demo") {
+            Task { await notifications.authorize() }
+        }
         await service.start(); ready = service.connected
         if ready { await refresh(); voice.refreshDevices() }
         else { notifications.report(service.connectionText, success: false, automatic: true) }
