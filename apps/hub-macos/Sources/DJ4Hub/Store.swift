@@ -11,7 +11,7 @@ enum HubPage: String, CaseIterable, Identifiable {
 @MainActor final class HubStore: ObservableObject {
     let service: HubService
     let voice = NativeVoice()
-    let notifications = HubNotifications()
+    let notifications: HubNotifications
     @Published var page: HubPage = .overview
     @Published var status = HubValue()
     @Published var traffic = HubValue()
@@ -34,9 +34,15 @@ enum HubPage: String, CaseIterable, Identifiable {
     private var shuttingDown = false
     init() {
         self.service = HubService()
+        self.notifications = HubNotifications()
     }
     init(service: HubService) {
         self.service = service
+        self.notifications = HubNotifications()
+    }
+    init(service: HubService, notifications: HubNotifications) {
+        self.service = service
+        self.notifications = notifications
     }
     @Published var backgroundAudio = UserDefaults.standard.object(forKey: "backgroundAudio") as? Bool ?? true {
         didSet {

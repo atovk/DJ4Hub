@@ -4,6 +4,7 @@ import UserNotifications
 @MainActor final class HubNotifications: NSObject, ObservableObject, UNUserNotificationCenterDelegate {
     @Published private(set) var latest = "暂无操作结果"
     @Published private(set) var permission = "首次操作时请求通知权限"
+    private let sendsSystemNotifications: Bool
     private var lastAutomaticError = ""
     private var lastAutomaticDate = Date.distantPast
     private var incoming = IncomingAlertTracker()
@@ -11,7 +12,13 @@ import UserNotifications
         didSet { UserDefaults.standard.set(incomingSound, forKey: "incomingSound") }
     }
 
+    init(sendsSystemNotifications: Bool = true) {
+        self.sendsSystemNotifications = sendsSystemNotifications
+        super.init()
+    }
+
     func receive(_ snapshot: HubValue) async {
+        guard sendsSystemNotifications else { return }
         let events = incoming.update(sms: snapshot["sms"].array.map(\.text), ringing: snapshot["ringing"].array.map(\.text))
         for (enabled, title) in [(events.sms, "收到新短信"), (events.call, "有电话呼入")] where enabled {
             let content = UNMutableNotificationContent()
@@ -23,9 +30,16 @@ import UserNotifications
         }
     }
 
-    func configure() { UNUserNotificationCenter.current().delegate = self }
+    func configure() {
+        guard sendsSystemNotifications else { return }
+        UNUserNotificationCenter.current().delegate = self
+    }
 
     func authorize() async {
+        guard sendsSystemNotifications else {
+            permission = "测试环境未启用系统通知"
+            return
+        }
         let center = UNUserNotificationCenter.current()
         do {
             let settings = await center.notificationSettings()
@@ -43,6 +57,7 @@ import UserNotifications
             guard detail != lastAutomaticError || Date().timeIntervalSince(lastAutomaticDate) >= 300 else { return }
             lastAutomaticError = detail; lastAutomaticDate = Date()
         }
+        guard sendsSystemNotifications else { return }
         Task {
             if !automatic { await authorize() }
             let center = UNUserNotificationCenter.current()

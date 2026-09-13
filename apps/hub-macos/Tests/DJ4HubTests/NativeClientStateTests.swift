@@ -38,7 +38,7 @@ final class NativeClientStateTests: XCTestCase {
         let service = serviceUsingClientFailureProtocol()
         defer { service.session.invalidateAndCancel() }
         service.connected = true
-        let store = HubStore(service: service)
+        let store = HubStore(service: service, notifications: HubNotifications(sendsSystemNotifications: false))
         store.ready = true
 
         await store.refresh()
@@ -63,7 +63,7 @@ final class NativeClientStateTests: XCTestCase {
         let service = serviceUsingClientFailureProtocol()
         defer { service.session.invalidateAndCancel() }
         service.connected = true
-        let store = HubStore(service: service)
+        let store = HubStore(service: service, notifications: HubNotifications(sendsSystemNotifications: false))
         store.ready = true
 
         await store.refresh()

@@ -23,9 +23,16 @@ class InstallTests(unittest.TestCase):
             directory.mkdir(parents=True)
         source = Path(__file__).resolve().parents[1] / "packaging" / "install"
         shutil.copy2(source, self.package / "install")
-        # Native, inert fixtures satisfy the architecture check; they never run.
-        for name in ("bin/dj4ghub-macos", "lib/libusb-1.0.0.dylib"):
-            shutil.copy("/usr/bin/true", self.package / name)
+        # Apple system tools can contain arm64e rather than the arm64 slice
+        # required by our packages. Compile an inert fixture for this runner.
+        arch = subprocess.check_output(["uname", "-m"], text=True).strip()
+        subprocess.run(
+            ["xcrun", "clang", "-arch", arch, "-x", "c", "-",
+             "-o", str(self.package / "bin/dj4ghub-macos")],
+            input="int main(void) { return 0; }\n", text=True, check=True,
+            capture_output=True, timeout=30,
+        )
+        shutil.copy(self.package / "bin/dj4ghub-macos", self.package / "lib/libusb-1.0.0.dylib")
         self.launcher = "#!/bin/sh\nexit 0\n"
         (self.package / "dj4ghub").write_text(self.launcher)
         (self.package / "dj4ghub").chmod(0o755)
@@ -65,6 +72,7 @@ class InstallTests(unittest.TestCase):
         self.old_install(1)
         result = self.run_installer()
         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("旧版服务未能停止", result.stderr)
         self.assertEqual(self.command.read_text(), self.old_launcher)
         self.assertFalse((self.installed / "bin").exists())
 
