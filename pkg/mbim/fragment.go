@@ -9,6 +9,15 @@ const fixedDoneOffset = headerLen + fragHdrLen + uuidLen + 4 + 4 + 4
 // fixedCmdOffset is where the info buffer begins inside a first COMMAND fragment.
 const fixedCmdOffset = headerLen + fragHdrLen + uuidLen + 4 + 4 + 4
 
+const (
+	// maxReassembledInfoSize is an implementation guard for malformed or
+	// hostile fragmented replies. Individual USB/control messages remain
+	// limited by maxMessageSize in transport.go; this cap applies after
+	// fragment reassembly and is intentionally larger than one transfer.
+	maxReassembledInfoSize  = 1024 * 1024
+	maxReassembledFragments = 4096
+)
+
 type collector struct {
 	started bool
 	total   uint32
@@ -31,6 +40,15 @@ func (c *collector) add(b []byte) (bool, error) {
 
 	total := le.Uint32(b[12:])
 	current := le.Uint32(b[16:])
+	if total == 0 {
+		return false, fmt.Errorf("mbim: fragment total must be non-zero")
+	}
+	if total > maxReassembledFragments {
+		return false, fmt.Errorf("mbim: fragment total %d exceeds max %d", total, maxReassembledFragments)
+	}
+	if current >= total {
+		return false, fmt.Errorf("mbim: fragment current=%d outside total=%d", current, total)
+	}
 	if !c.started {
 		if current != 0 {
 			return false, fmt.Errorf("mbim: first fragment current=%d, want 0", current)
@@ -42,19 +60,37 @@ func (c *collector) add(b []byte) (bool, error) {
 		c.cid = le.Uint32(b[36:])
 		c.status = le.Uint32(b[40:])
 		c.fullLen = le.Uint32(b[44:])
+		if c.fullLen > maxReassembledInfoSize {
+			return false, fmt.Errorf("mbim: declared info length %d exceeds max %d", c.fullLen, maxReassembledInfoSize)
+		}
 		c.total = total
 		c.next = 1
 		c.started = true
-		c.info = append(c.info, b[fixedDoneOffset:]...)
+		if err := c.appendInfo(b[fixedDoneOffset:]); err != nil {
+			return false, err
+		}
 		return c.next >= c.total, nil
 	}
 
+	if total != c.total {
+		return false, fmt.Errorf("mbim: fragment total changed got=%d want=%d", total, c.total)
+	}
 	if current != c.next {
 		return false, fmt.Errorf("mbim: fragment out of order got=%d want=%d", current, c.next)
 	}
 	c.next++
-	c.info = append(c.info, b[headerLen+fragHdrLen:]...)
+	if err := c.appendInfo(b[headerLen+fragHdrLen:]); err != nil {
+		return false, err
+	}
 	return c.next >= c.total, nil
+}
+
+func (c *collector) appendInfo(b []byte) error {
+	if len(c.info)+len(b) > maxReassembledInfoSize {
+		return fmt.Errorf("mbim: reassembled info length %d exceeds max %d", len(c.info)+len(b), maxReassembledInfoSize)
+	}
+	c.info = append(c.info, b...)
+	return nil
 }
 
 func (c *collector) commandDone() (CommandDone, error) {

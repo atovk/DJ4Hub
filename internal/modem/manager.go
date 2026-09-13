@@ -375,6 +375,9 @@ func (m *Manager) AnswerCall() error {
 
 // DialCall 发起语音外呼 (ATD<number>;)
 func (m *Manager) DialCall(number string) error {
+	if err := validateATDialNumber(number); err != nil {
+		return err
+	}
 	cmd := fmt.Sprintf("ATD%s;", number)
 	_, err := m.ExecuteAT(cmd, 60*time.Second)
 	if err != nil {
@@ -383,6 +386,29 @@ func (m *Manager) DialCall(number string) error {
 	}
 	logger.Info(fmt.Sprintf("[%s] 拨号指令已发出", m.cfg.ID), "number", number)
 	return nil
+}
+
+func validateATDialNumber(number string) error {
+	if hasATControlChar(number) || strings.ContainsAny(number, "\";") {
+		return errors.New("拨号号码包含不允许的 AT 控制字符")
+	}
+	return nil
+}
+
+func validateATQuotedArgument(value, name string) error {
+	if hasATControlChar(value) || strings.Contains(value, "\"") {
+		return fmt.Errorf("%s 包含不允许的 AT 控制字符", name)
+	}
+	return nil
+}
+
+func hasATControlChar(value string) bool {
+	for _, r := range value {
+		if r < 0x20 || r == 0x7f {
+			return true
+		}
+	}
+	return false
 }
 
 // HangupCall 挂断通话 (ATH)
@@ -2137,6 +2163,10 @@ func (m *Manager) decodeUSSDText(raw string, dcs int) string {
 // command: USSD 代码，如 "*100#", "*135#"
 // timeout: 等待 URC 响应的超时时间
 func (m *Manager) ExecuteUSSD(command string, timeout time.Duration) (*USSDResult, error) {
+	if err := validateATQuotedArgument(command, "USSD 指令"); err != nil {
+		return nil, err
+	}
+
 	// 清空可能残留的旧结果
 	select {
 	case <-m.ussdChan:

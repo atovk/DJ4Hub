@@ -64,6 +64,29 @@ func indicateStatusMsg(tx uint32, service UUID, cid uint32, info []byte) []byte 
 	return b
 }
 
+func makeIndicationFragment(tx uint32, total, current uint32, service UUID, cid uint32, info []byte, withFixed bool) []byte {
+	if withFixed {
+		bodyLen := fragHdrLen + uuidLen + 4 + 4 + len(info)
+		b := make([]byte, headerLen+bodyLen)
+		putHeader(b, MessageTypeIndicateStatus, uint32(len(b)), tx)
+		le.PutUint32(b[12:], total)
+		le.PutUint32(b[16:], current)
+		copy(b[20:36], service[:])
+		le.PutUint32(b[36:], cid)
+		le.PutUint32(b[40:], uint32(len(info)))
+		copy(b[44:], info)
+		return b
+	}
+
+	bodyLen := fragHdrLen + len(info)
+	b := make([]byte, headerLen+bodyLen)
+	putHeader(b, MessageTypeIndicateStatus, uint32(len(b)), tx)
+	le.PutUint32(b[12:], total)
+	le.PutUint32(b[16:], current)
+	copy(b[20:], info)
+	return b
+}
+
 func makeCommandDoneFragmentFor(tx uint32, service UUID, cid uint32, info []byte) []byte {
 	bodyLen := fragHdrLen + uuidLen + 4 + 4 + 4 + len(info)
 	b := make([]byte, headerLen+bodyLen)
@@ -333,4 +356,257 @@ func TestDeviceMalformedCommandDoneFailsPendingCommand(t *testing.T) {
 		t.Fatal("Command should fail for truncated COMMAND_DONE info")
 	}
 	d.Close()
+}
+
+func TestDeviceCommandFragmentErrorCleansCollector(t *testing.T) {
+	ft := newFakeTransport()
+	ft.reply = func(w []byte) ([]byte, bool) {
+		h, _ := decodeHeader(w)
+		switch h.Type {
+		case MessageTypeOpen:
+			return openDoneMsg(h.TransactionID), true
+		case MessageTypeCommand:
+			resp := makeCommandDoneFragment(h.TransactionID, 2, 0, 0, []byte{0xde}, true)
+			le.PutUint32(resp[12:], 0)
+			return resp, true
+		}
+		return nil, false
+	}
+
+	d := newDevice(ft)
+	if err := d.Open(context.Background(), 4096); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer d.Close()
+
+	_, err := d.Command(context.Background(), UUIDBasicConnect, CIDBasicConnectDeviceCaps, CommandTypeQuery, nil)
+	if err == nil {
+		t.Fatal("Command error = nil, want malformed fragment error")
+	}
+	d.mu.Lock()
+	collectors := len(d.collector)
+	d.mu.Unlock()
+	if collectors != 0 {
+		t.Fatalf("collector entries = %d, want 0 after malformed command", collectors)
+	}
+}
+
+func TestDeviceCommandTimeoutCleansIncompleteCollector(t *testing.T) {
+	ft := newFakeTransport()
+	ft.reply = func(w []byte) ([]byte, bool) {
+		h, _ := decodeHeader(w)
+		switch h.Type {
+		case MessageTypeOpen:
+			return openDoneMsg(h.TransactionID), true
+		case MessageTypeCommand:
+			return makeCommandDoneFragment(h.TransactionID, 2, 0, 0, []byte{0xde}, true), true
+		}
+		return nil, false
+	}
+
+	d := newDevice(ft)
+	if err := d.Open(context.Background(), 4096); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer d.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	_, err := d.Command(ctx, UUIDBasicConnect, CIDBasicConnectDeviceCaps, CommandTypeQuery, nil)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Command error = %v, want context deadline", err)
+	}
+	d.mu.Lock()
+	collectors := len(d.collector)
+	d.mu.Unlock()
+	if collectors != 0 {
+		t.Fatalf("collector entries = %d, want 0 after timeout", collectors)
+	}
+}
+
+func TestDeviceIndicationMalformedTx0Recovers(t *testing.T) {
+	ft := newFakeTransport()
+	ft.reply = func(w []byte) ([]byte, bool) {
+		h, _ := decodeHeader(w)
+		if h.Type == MessageTypeOpen {
+			return openDoneMsg(h.TransactionID), true
+		}
+		return nil, false
+	}
+	d := newDevice(ft)
+	if err := d.Open(context.Background(), 4096); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer d.Close()
+
+	bad := indicateStatusMsg(0, UUIDBasicConnect, CIDBasicConnectSignalState, []byte{0x01})
+	le.PutUint32(bad[12:], 0)
+	ft.toRead <- bad
+	time.Sleep(20 * time.Millisecond)
+
+	info := []byte{0x02, 0x03}
+	ft.toRead <- indicateStatusMsg(0, UUIDBasicConnect, CIDBasicConnectSignalState, info)
+
+	select {
+	case ind := <-d.Indications():
+		if !ind.Service.Equal(UUIDBasicConnect) || ind.CID != CIDBasicConnectSignalState || string(ind.InfoBuffer) != string(info) {
+			t.Fatalf("indication = %+v, want recovered valid indication", ind)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("valid indication after malformed tx0 was not delivered")
+	}
+}
+
+func TestDeviceBoundsIncompleteIndicationCollectors(t *testing.T) {
+	ft := newFakeTransport()
+	ft.reply = func(w []byte) ([]byte, bool) {
+		h, _ := decodeHeader(w)
+		if h.Type == MessageTypeOpen {
+			return openDoneMsg(h.TransactionID), true
+		}
+		return nil, false
+	}
+	d := newDevice(ft)
+	if err := d.Open(context.Background(), 4096); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer d.Close()
+
+	for tx := uint32(1); tx <= maxFragmentCollectors+10; tx++ {
+		ft.toRead <- makeIndicationFragment(tx, 2, 0, UUIDBasicConnect, CIDBasicConnectSignalState, []byte{byte(tx)}, true)
+	}
+
+	deadline := time.After(time.Second)
+	for {
+		d.mu.Lock()
+		count := len(d.collector)
+		d.mu.Unlock()
+		if count == maxFragmentCollectors {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("collector entries = %d, want %d", count, maxFragmentCollectors)
+		default:
+			time.Sleep(time.Millisecond)
+		}
+	}
+}
+
+func TestDevicePendingCommandCompletesWhenIndicationCollectorsFull(t *testing.T) {
+	ft := newFakeTransport()
+	ft.reply = func(w []byte) ([]byte, bool) {
+		h, _ := decodeHeader(w)
+		switch h.Type {
+		case MessageTypeOpen:
+			return openDoneMsg(h.TransactionID), true
+		case MessageTypeCommand:
+			return makeCommandDoneFragmentFor(h.TransactionID, UUIDBasicConnect, CIDBasicConnectDeviceCaps, []byte{0xaa}), true
+		}
+		return nil, false
+	}
+	d := newDevice(ft)
+	if err := d.Open(context.Background(), 4096); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer d.Close()
+
+	for tx := uint32(1000); tx < 1000+maxFragmentCollectors; tx++ {
+		ft.toRead <- makeIndicationFragment(tx, 2, 0, UUIDBasicConnect, CIDBasicConnectSignalState, []byte{byte(tx)}, true)
+	}
+
+	deadline := time.After(time.Second)
+	for {
+		d.mu.Lock()
+		count := len(d.collector)
+		d.mu.Unlock()
+		if count == maxFragmentCollectors {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("collector entries = %d, want %d before command", count, maxFragmentCollectors)
+		default:
+			time.Sleep(time.Millisecond)
+		}
+	}
+
+	resp, err := d.Command(context.Background(), UUIDBasicConnect, CIDBasicConnectDeviceCaps, CommandTypeQuery, nil)
+	if err != nil {
+		t.Fatalf("Command() error = %v, want success despite stale indication collectors", err)
+	}
+	if string(resp.InfoBuffer) != string([]byte{0xaa}) {
+		t.Fatalf("InfoBuffer = %x, want aa", resp.InfoBuffer)
+	}
+}
+
+func TestDeviceIndicationRecoversWhenIndicationCollectorsFull(t *testing.T) {
+	ft := newFakeTransport()
+	ft.reply = func(w []byte) ([]byte, bool) {
+		h, _ := decodeHeader(w)
+		if h.Type == MessageTypeOpen {
+			return openDoneMsg(h.TransactionID), true
+		}
+		return nil, false
+	}
+	d := newDevice(ft)
+	if err := d.Open(context.Background(), 4096); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer d.Close()
+
+	for tx := uint32(2000); tx < 2000+maxFragmentCollectors; tx++ {
+		ft.toRead <- makeIndicationFragment(tx, 2, 0, UUIDBasicConnect, CIDBasicConnectSignalState, []byte{byte(tx)}, true)
+	}
+
+	deadline := time.After(time.Second)
+	for {
+		d.mu.Lock()
+		count := len(d.collector)
+		d.mu.Unlock()
+		if count == maxFragmentCollectors {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("collector entries = %d, want %d before valid indication", count, maxFragmentCollectors)
+		default:
+			time.Sleep(time.Millisecond)
+		}
+	}
+
+	info := []byte{0x44, 0x55}
+	ft.toRead <- indicateStatusMsg(3000, UUIDBasicConnect, CIDBasicConnectSignalState, info)
+
+	select {
+	case ind := <-d.Indications():
+		if !ind.Service.Equal(UUIDBasicConnect) || ind.CID != CIDBasicConnectSignalState || string(ind.InfoBuffer) != string(info) {
+			t.Fatalf("indication = %+v, want recovered valid indication", ind)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("valid indication after full stale indication collectors was not delivered")
+	}
+}
+
+func TestDevicePendingCollectorLimitFailsCommandClearly(t *testing.T) {
+	d := newDevice(newFakeTransport())
+	ch := d.registerPending(99)
+
+	d.mu.Lock()
+	for tx := uint32(1); tx <= maxFragmentCollectors; tx++ {
+		d.pending[tx] = make(chan commandResult, 1)
+		d.collector[tx] = newCollector()
+	}
+	d.mu.Unlock()
+
+	d.handleCommandDoneFragment(99, makeCommandDoneFragmentFor(99, UUIDBasicConnect, CIDBasicConnectDeviceCaps, nil))
+
+	select {
+	case result := <-ch:
+		if result.err == nil {
+			t.Fatal("COMMAND_DONE result error = nil, want collector limit error")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("COMMAND_DONE with full pending collectors did not fail pending command")
+	}
 }

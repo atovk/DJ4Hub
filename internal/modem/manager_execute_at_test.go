@@ -471,3 +471,109 @@ func TestManagerExecuteATReturnsResponseWhenRunning(t *testing.T) {
 		t.Fatalf("ExecuteAT() resp = %q, want %q", resp, "OK")
 	}
 }
+
+func TestDialCallRejectsATCommandDelimitersBeforeQueue(t *testing.T) {
+	m, err := New(config.DeviceConfig{ID: "dev-at", DeviceBackend: "at", ATPort: "/dev/ttyUSB6"})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	m.running = true
+	m.healthy = true
+
+	for _, number := range []string{"123;ATH", "123\rATH", "123\nATH", `123"ATH`, "123\x1bATH"} {
+		if err := m.DialCall(number); err == nil {
+			t.Fatalf("DialCall(%q) error = nil, want validation error", number)
+		}
+		select {
+		case req := <-m.cmdChan:
+			t.Fatalf("DialCall(%q) queued AT command %q, want validation before queue", number, req.cmd)
+		default:
+		}
+	}
+}
+
+func TestDialCallAllowsLegitimateNumber(t *testing.T) {
+	m, err := New(config.DeviceConfig{ID: "dev-at", DeviceBackend: "at", ATPort: "/dev/ttyUSB6"})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	m.running = true
+	m.healthy = true
+
+	done := make(chan error, 1)
+	go func() {
+		req := <-m.cmdChan
+		if req.cmd != "ATD+8613800138000;" {
+			done <- errors.New("unexpected command: " + req.cmd)
+			return
+		}
+		req.respChan <- "OK"
+		done <- nil
+	}()
+
+	if err := m.DialCall("+8613800138000"); err != nil {
+		t.Fatalf("DialCall() error = %v", err)
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestExecuteUSSDRejectsATQuotedArgumentInjectionBeforeQueue(t *testing.T) {
+	m, err := New(config.DeviceConfig{ID: "dev-at", DeviceBackend: "at", ATPort: "/dev/ttyUSB6"})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	m.running = true
+	m.healthy = true
+
+	for _, command := range []string{`*100#",15`, "*100#\rAT", "*100#\nAT", "*100#\x00AT"} {
+		if _, err := m.ExecuteUSSD(command, time.Millisecond); err == nil {
+			t.Fatalf("ExecuteUSSD(%q) error = nil, want validation error", command)
+		}
+		select {
+		case req := <-m.cmdChan:
+			t.Fatalf("ExecuteUSSD(%q) queued AT command %q, want validation before queue", command, req.cmd)
+		default:
+		}
+	}
+}
+
+func TestExecuteUSSDAllowsInteractiveText(t *testing.T) {
+	m, err := New(config.DeviceConfig{ID: "dev-at", DeviceBackend: "at", ATPort: "/dev/ttyUSB6"})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	m.running = true
+	m.healthy = true
+
+	done := make(chan error, 1)
+	go func() {
+		req := <-m.cmdChan
+		if req.cmd != `AT+CSCS="GSM"` {
+			done <- errors.New("unexpected charset command: " + req.cmd)
+			return
+		}
+		req.respChan <- "OK"
+
+		req = <-m.cmdChan
+		if req.cmd != `AT+CUSD=1,"1;next menu",15` {
+			done <- errors.New("unexpected USSD command: " + req.cmd)
+			return
+		}
+		req.respChan <- "OK"
+		m.ussdChan <- USSDResult{Status: 0, Text: "ok"}
+		done <- nil
+	}()
+
+	got, err := m.ExecuteUSSD("1;next menu", time.Second)
+	if err != nil {
+		t.Fatalf("ExecuteUSSD() error = %v", err)
+	}
+	if got == nil || got.Text != "ok" {
+		t.Fatalf("ExecuteUSSD() = %+v, want ok result", got)
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}

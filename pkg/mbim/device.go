@@ -2,9 +2,12 @@ package mbim
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 )
+
+const maxFragmentCollectors = 64
 
 // Device is an opened MBIM control endpoint with transaction multiplexing.
 type Device struct {
@@ -124,7 +127,7 @@ func (d *Device) Command(ctx context.Context, service UUID, cid uint32, ct Comma
 
 	select {
 	case <-ctx.Done():
-		d.removePending(tx)
+		d.removeTransaction(tx)
 		return CommandDone{}, ctx.Err()
 	case result := <-ch:
 		if result.err != nil {
@@ -166,9 +169,18 @@ func (d *Device) readLoop() {
 }
 
 func (d *Device) handleCommandDoneFragment(tx uint32, msg []byte) {
-	c := d.commandCollector(tx)
+	c, err := d.commandCollector(tx, true)
+	if err != nil {
+		d.deliverError(tx, err)
+		return
+	}
 	done, err := c.add(msg)
-	if err != nil || !done {
+	if err != nil {
+		d.removeCollector(tx)
+		d.deliverError(tx, err)
+		return
+	}
+	if !done {
 		return
 	}
 
@@ -182,9 +194,16 @@ func (d *Device) handleCommandDoneFragment(tx uint32, msg []byte) {
 }
 
 func (d *Device) handleIndicationFragment(tx uint32, msg []byte) {
-	c := d.commandCollector(tx)
+	c, err := d.commandCollector(tx, false)
+	if err != nil {
+		return
+	}
 	done, err := c.add(commandDoneShapeIndication(msg))
-	if err != nil || !done {
+	if err != nil {
+		d.removeCollector(tx)
+		return
+	}
+	if !done {
 		return
 	}
 
@@ -199,15 +218,38 @@ func (d *Device) handleIndicationFragment(tx uint32, msg []byte) {
 	}
 }
 
-func (d *Device) commandCollector(tx uint32) *collector {
+func (d *Device) commandCollector(tx uint32, requirePending bool) (*collector, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	c := d.collector[tx]
 	if c == nil {
+		if requirePending {
+			if _, ok := d.pending[tx]; !ok {
+				return nil, errors.New("mbim: received COMMAND_DONE for unknown transaction")
+			}
+		}
+		if len(d.collector) >= maxFragmentCollectors {
+			if !d.evictNonPendingCollectorLocked() {
+				if requirePending {
+					return nil, fmt.Errorf("mbim: pending fragment collector limit reached max=%d", maxFragmentCollectors)
+				}
+				return nil, fmt.Errorf("mbim: indication fragment collector limit reached max=%d", maxFragmentCollectors)
+			}
+		}
 		c = newCollector()
 		d.collector[tx] = c
 	}
-	return c
+	return c, nil
+}
+
+func (d *Device) evictNonPendingCollectorLocked() bool {
+	for tx := range d.collector {
+		if _, pending := d.pending[tx]; !pending {
+			delete(d.collector, tx)
+			return true
+		}
+	}
+	return false
 }
 
 func (d *Device) removeCollector(tx uint32) {
@@ -219,6 +261,13 @@ func (d *Device) removeCollector(tx uint32) {
 func (d *Device) removePending(tx uint32) {
 	d.mu.Lock()
 	delete(d.pending, tx)
+	d.mu.Unlock()
+}
+
+func (d *Device) removeTransaction(tx uint32) {
+	d.mu.Lock()
+	delete(d.pending, tx)
+	delete(d.collector, tx)
 	d.mu.Unlock()
 }
 

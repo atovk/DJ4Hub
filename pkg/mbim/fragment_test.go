@@ -92,6 +92,55 @@ func TestReassembleRejectsTruncatedDeclaredInfo(t *testing.T) {
 	}
 }
 
+func TestCollectorRejectsInvalidFragmentMetadata(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func([]byte)
+	}{
+		{
+			name: "zero total",
+			mutate: func(f []byte) {
+				le.PutUint32(f[12:], 0)
+			},
+		},
+		{
+			name: "current outside total",
+			mutate: func(f []byte) {
+				le.PutUint32(f[16:], 1)
+			},
+		},
+		{
+			name: "declared info too large",
+			mutate: func(f []byte) {
+				le.PutUint32(f[44:], maxReassembledInfoSize+1)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := makeCommandDoneFragment(7, 1, 0, 0, []byte{0x01}, true)
+			tt.mutate(f)
+			c := newCollector()
+			if _, err := c.add(f); err == nil {
+				t.Fatal("add() error = nil, want rejection")
+			}
+		})
+	}
+}
+
+func TestCollectorRejectsChangedFragmentTotal(t *testing.T) {
+	f0 := makeCommandDoneFragment(9, 2, 0, 0, []byte{0x11}, true)
+	f1 := makeCommandDoneFragment(9, 3, 1, 0, []byte{0x22}, false)
+	c := newCollector()
+	if done, err := c.add(f0); err != nil || done {
+		t.Fatalf("first add done=%v err=%v, want incomplete success", done, err)
+	}
+	if _, err := c.add(f1); err == nil {
+		t.Fatal("second add error = nil, want changed total rejection")
+	}
+}
+
 func TestSplitCommandFitsSingle(t *testing.T) {
 	frags := splitCommand(1, UUIDBasicConnect, CIDBasicConnectDeviceCaps, CommandTypeQuery, nil, 4096)
 	if len(frags) != 1 {
