@@ -48,6 +48,20 @@ struct HubValue {
         }
         return value
     }
+    static func isConnectionFailure(_ error: Error) -> Bool {
+        guard let urlError = error as? URLError else { return false }
+        switch urlError.code {
+        case .cannotConnectToHost, .cannotFindHost, .dnsLookupFailed, .networkConnectionLost,
+             .notConnectedToInternet, .timedOut:
+            return true
+        default:
+            return false
+        }
+    }
+    func markDisconnected(_ message: String) {
+        connected = false
+        connectionText = message
+    }
     func requestURL(_ path: String) throws -> URL {
         guard let relative = URLComponents(string: path), relative.scheme == nil,
               relative.host == nil, relative.fragment == nil, !relative.path.contains(".."),
@@ -75,6 +89,7 @@ struct HubValue {
             let url = URL(string: "http://127.0.0.1:\(port)")!
             if await probe(url, demo: demo) { base = url; connected = true; connectionText = "已连接现有服务 · \(port)"; return }
         }
+        guard await stopUnresponsiveOwnedService() else { return }
         guard let resources = Bundle.main.resourceURL else { connectionText = "缺少 App 资源"; return }
         let binary = resources.appendingPathComponent("backend/bin/dj4ghub-macos")
         guard FileManager.default.isExecutableFile(atPath: binary.path) else { connectionText = "未打包设备服务；可先独立启动 Web 服务再重试"; return }
@@ -89,6 +104,15 @@ struct HubValue {
             if !FileManager.default.fileExists(atPath: logURL.path) { FileManager.default.createFile(atPath: logURL.path, contents: nil) }
             log = try FileHandle(forWritingTo: logURL); try log?.seekToEnd()
             child.standardOutput = log; child.standardError = log
+            child.terminationHandler = { [weak self, weak child] _ in
+                Task { @MainActor in
+                    guard let self, let child, self.process === child else { return }
+                    self.process = nil
+                    try? self.log?.close()
+                    self.log = nil
+                    if self.connected { self.markDisconnected("内置服务已退出，可重试连接") }
+                }
+            }
             try child.run(); process = child
             for _ in 0..<30 {
                 if !child.isRunning { throw HubError(message: "设备服务启动失败，请查看 native-service.log；未停止其他服务") }
@@ -102,5 +126,27 @@ struct HubValue {
     func stopOwned() {
         if let process, process.isRunning { process.terminate() }
         process = nil; try? log?.close(); log = nil
+        connected = false
+    }
+    private func stopUnresponsiveOwnedService() async -> Bool {
+        guard let child = process else { return true }
+        connectionText = "内置服务未响应，正在重启…"
+        if child.isRunning {
+            child.terminate()
+            for _ in 0..<20 {
+                if !child.isRunning { break }
+                try? await Task.sleep(nanoseconds: 100_000_000)
+            }
+        }
+        guard !child.isRunning else {
+            connectionText = "内置服务正在退出，请稍后重试连接"
+            connected = false
+            return false
+        }
+        process = nil
+        try? log?.close()
+        log = nil
+        connected = false
+        return true
     }
 }

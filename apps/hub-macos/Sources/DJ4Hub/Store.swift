@@ -9,7 +9,7 @@ enum HubPage: String, CaseIterable, Identifiable {
     }
 }
 @MainActor final class HubStore: ObservableObject {
-    let service = HubService()
+    let service: HubService
     let voice = NativeVoice()
     let notifications = HubNotifications()
     @Published var page: HubPage = .overview
@@ -32,6 +32,12 @@ enum HubPage: String, CaseIterable, Identifiable {
     private var standbyTask: Task<Void, Never>?
     private var standbyAttempted = false
     private var shuttingDown = false
+    init() {
+        self.service = HubService()
+    }
+    init(service: HubService) {
+        self.service = service
+    }
     @Published var backgroundAudio = UserDefaults.standard.object(forKey: "backgroundAudio") as? Bool ?? true {
         didSet {
             UserDefaults.standard.set(backgroundAudio, forKey: "backgroundAudio")
@@ -75,7 +81,12 @@ enum HubPage: String, CaseIterable, Identifiable {
         if ready && alertsTask == nil {
             alertsTask = Task { [weak self] in
                 while !Task.isCancelled {
-                    if let self, let snapshot = try? await self.service.request("api/alerts") { await self.notifications.receive(snapshot) }
+                    if let self {
+                        do { await self.notifications.receive(try await self.service.request("api/alerts")) }
+                        catch {
+                            if HubService.isConnectionFailure(error) { self.handleConnectionFailure(error) }
+                        }
+                    }
                     do { try await Task.sleep(nanoseconds: 3_000_000_000) } catch { return }
                 }
             }
@@ -112,7 +123,12 @@ enum HubPage: String, CaseIterable, Identifiable {
                 if !calls.isEmpty && next.isEmpty { voice.stopStreams() }
                 calls = next
             }
-        } catch { healthKnown = false; deviceConnected = false; notifications.report(error.localizedDescription, success: false, automatic: true) }
+        } catch {
+            healthKnown = false
+            deviceConnected = false
+            if HubService.isConnectionFailure(error) { handleConnectionFailure(error) }
+            notifications.report(error.localizedDescription, success: false, automatic: true)
+        }
     }
     func run(_ operation: @escaping () async throws -> Void) {
         guard !busy else { return }; busy = true
@@ -135,5 +151,15 @@ enum HubPage: String, CaseIterable, Identifiable {
             catch { self.voice.stopStreams(); throw error }
             if action == "hangup" { self.voice.stopStreams() }
         }
+    }
+    private func handleConnectionFailure(_ error: Error) {
+        ready = false
+        healthKnown = false
+        deviceConnected = false
+        alertsTask?.cancel()
+        alertsTask = nil
+        stopBackgroundPreparation()
+        standbyAttempted = false
+        service.markDisconnected("本地服务连接中断：\(error.localizedDescription)。请重试连接。")
     }
 }

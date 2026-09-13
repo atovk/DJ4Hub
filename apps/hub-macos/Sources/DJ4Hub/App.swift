@@ -32,11 +32,23 @@ import AppKit
             CommandGroup(after: .appInfo) { Button("打开 Web 控制台") { store.service.openWeb() } }
         }
         MenuBarExtra("DJ 4G Hub", systemImage: "antenna.radiowaves.left.and.right") {
-            Button("显示客户端") { NSApp.activate(ignoringOtherApps: true); NSApp.windows.first?.makeKeyAndOrderFront(nil) }
-            Button("打开 Web") { store.service.openWeb() }
-            Divider()
-            Button("退出") { NSApp.terminate(nil) }
+            MenuBarCommands(store: store)
         }
+    }
+}
+
+private struct MenuBarCommands: View {
+    @ObservedObject var store: HubStore
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some View {
+        Button("显示客户端") {
+            openWindow(id: "main")
+            NSApp.activate(ignoringOtherApps: true)
+        }
+        Button("打开 Web") { store.service.openWeb() }
+        Divider()
+        Button("退出") { NSApp.terminate(nil) }
     }
 }
 
