@@ -36,6 +36,8 @@ jobs:
           python3 -c 'import ast, pathlib; ast.parse(pathlib.Path("scripts/collect-go-licenses.py").read_text())'
       - name: Vet
         run: go vet ./...
+      - name: Test installer upgrades
+        run: python3 scripts/test-macos-install.py
       - name: Test
         run: go test ./...
       - name: Race test

@@ -34,7 +34,10 @@ if [ "$(uname -s)" != "Darwin" ] ||
 fi
 
 if [ -x "${COMMAND_PATH}" ]; then
-  "${COMMAND_PATH}" stop >/dev/null 2>&1 || true
+  if ! "${COMMAND_PATH}" stop; then
+    echo "安装失败：旧版服务未能停止，已保留原安装。请停止旧服务后重试。" >&2
+    exit 1
+  fi
 fi
 
 echo "DJ 4G Hub 将安装到 ${INSTALL_DIR}"
