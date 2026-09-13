@@ -50,6 +50,7 @@ case "$PACKAGE_DIR" in
   *.app)
     python3 - "$ENTRY" "$PACKAGE_DIR/Contents/Info.plist" <<'PY'
 import plistlib
+from pathlib import Path
 import re
 import subprocess
 import sys
@@ -59,6 +60,8 @@ with open(plist, 'rb') as stream:
     info = plistlib.load(stream)
 assert info['CFBundleExecutable'] == 'DJ4Hub'
 assert info['LSMinimumSystemVersion'] == '13.0'
+icon = Path(plist).parent / 'Resources' / info['CFBundleIconFile']
+assert icon.is_file() and icon.read_bytes()[:4] == b'icns', 'Missing or invalid app icon'
 assert subprocess.check_output(['lipo', '-archs', binary], text=True).strip() == subprocess.check_output(['uname', '-m'], text=True).strip()
 minimums = re.findall(r'^\s+minos (\d+(?:\.\d+)*)', subprocess.check_output(['otool', '-l', binary], text=True), re.M)
 assert minimums and all(tuple(map(int, v.split('.')[:2])) <= (13, 0) for v in minimums), minimums
