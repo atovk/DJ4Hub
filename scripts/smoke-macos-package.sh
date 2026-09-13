@@ -2,6 +2,7 @@
 set -eu
 
 PACKAGE_DIR=${1:?Pass the unpacked portable package or .app directory}
+PACKAGE_DIR=$(CDPATH='' cd -- "$PACKAGE_DIR" && pwd -P)
 case "$PACKAGE_DIR" in
   *.app)
     BIN="$PACKAGE_DIR/Contents/Resources/backend/bin/dj4ghub-macos"
@@ -68,11 +69,27 @@ esac
 
 LOG=$(mktemp "${TMPDIR:-/tmp}/dj4hub-smoke.XXXXXX")
 PID=
+native_pid() {
+  python3 - "$ENTRY" <<'PY'
+import subprocess
+import sys
+entry = sys.argv[1]
+for line in subprocess.check_output(['ps', '-axo', 'pid=,command='], text=True).splitlines():
+    parts = line.strip().split(None, 1)
+    if len(parts) == 2 and (parts[1] == entry or parts[1].startswith(entry + ' ')):
+        print(parts[0])
+PY
+}
 cleanup() {
   if [ -n "$PID" ]; then
-    children=$(pgrep -P "$PID" || true)
+    owner="$PID"
+    case "$PACKAGE_DIR" in *.app) owner=$(native_pid);; esac
     # Both entrypoints may own a backend child. Kill only this test's processes.
-    for child in $children; do kill -TERM "$child" 2>/dev/null || true; done
+    for parent in $owner; do
+      children=$(pgrep -P "$parent" || true)
+      for child in $children; do kill -TERM "$child" 2>/dev/null || true; done
+      kill -TERM "$parent" 2>/dev/null || true
+    done
     kill -TERM "$PID" 2>/dev/null || true
     wait "$PID" 2>/dev/null || true
   fi
@@ -82,7 +99,15 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 case "$PACKAGE_DIR" in
-  *.app) "$ENTRY" --demo -backgroundAudio NO >"$LOG" 2>&1 & ;;
+  *.app)
+    if [ -n "$(native_pid)" ]; then
+      echo 'This App is already running; no existing instance was stopped.' >&2
+      exit 1
+    fi
+    # SwiftUI needs the normal LaunchServices open event to create its window.
+    # Keep Cocoa defaults before the valueless application flag.
+    open -n -W "$PACKAGE_DIR" --args -backgroundAudio NO --demo >"$LOG" 2>&1 &
+    ;;
   *) DJ4GHUB_NO_OPEN=1 "$ENTRY" start --demo >"$LOG" 2>&1 & ;;
 esac
 PID=$!
@@ -90,7 +115,7 @@ PID=$!
 attempt=0
 while [ "$attempt" -lt 60 ]; do
   if ! kill -0 "$PID" 2>/dev/null; then break; fi
-  if curl -fsS --max-time 2 "http://127.0.0.1:$PORT/api/health" 2>/dev/null |
+  if curl --noproxy '*' -fsS --max-time 2 "http://127.0.0.1:$PORT/api/health" 2>/dev/null |
     python3 -c 'import json,sys; d=json.load(sys.stdin); sys.exit(not (d.get("ok") is True and d.get("demo") is True))' 2>/dev/null; then
     echo "Smoke test passed: $ENTRY"
     exit 0
